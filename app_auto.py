@@ -1,6 +1,6 @@
 # app_auto.py
 # Aplikasi Desktop + Auto Scan Multi Film & Multi Wilayah
-# (REFACTORED SESUAI LOGIC test5.py)
+# (REFACTORED SESUAI LOGIC test5.py + FILTER JAM AKTIF)
 
 import customtkinter as ctk
 from tkinter import ttk, messagebox, filedialog
@@ -24,17 +24,22 @@ class XXIAutoApp(ctk.CTk):
         super().__init__()
         
         self.title("XXI Auto Scanner - Multi Film & Wilayah")
-        self.geometry("1400x800")
+        self.geometry("1500x850")
         
         # =========================================================
         # VARIABLES
         # =========================================================
         self.is_scanning = False
+        self.is_detecting_times = False
         self.scan_thread = None
         self.driver = None
         self.wait = None
         self.data_results = []
         self.row_counter = 0
+        
+        # Untuk menyimpan jam aktif per bioskop
+        self.active_times_map = {}  # {"CINEMA_NAME": ["10:00", "13:00", ...]}
+        self.selected_times = []  # Jam yang dipilih user
         
         # Default config
         self.films = [
@@ -53,7 +58,7 @@ class XXIAutoApp(ctk.CTk):
         """Buat seluruh UI"""
         
         # ========== FRAME KIRI (CONTROL PANEL) ==========
-        left_frame = ctk.CTkFrame(self, width=350)
+        left_frame = ctk.CTkFrame(self, width=380)
         left_frame.pack(side="left", fill="y", padx=10, pady=10)
         
         # Header
@@ -94,6 +99,26 @@ class XXIAutoApp(ctk.CTk):
         add_region_frame.pack(fill="x", padx=15, pady=2)
         ctk.CTkButton(add_region_frame, text="+ Tambah Wilayah", command=self.add_region, height=30, fg_color="gray", width=120).pack(side="left", padx=2)
         ctk.CTkButton(add_region_frame, text="🗑️ Clear", command=self.clear_regions, height=30, fg_color="red", width=100).pack(side="left", padx=2)
+        
+        ctk.CTkFrame(left_frame, height=2, fg_color="gray").pack(fill="x", padx=10, pady=10)
+        
+        # ===== JAM AKTIF =====
+        ctk.CTkLabel(left_frame, text="🕐 FILTER JAM AKTIF", font=("Arial", 14, "bold")).pack(anchor="w", padx=15)
+        
+        button_frame = ctk.CTkFrame(left_frame)
+        button_frame.pack(fill="x", padx=15, pady=5)
+        ctk.CTkButton(button_frame, text="🔍 Deteksi Jam", command=self.detect_active_times, height=35, fg_color="purple").pack(side="left", padx=2, fill="x", expand=True)
+        
+        # Tampilkan jam aktif
+        ctk.CTkLabel(left_frame, text="Jam yang ditemukan:", font=("Arial", 10)).pack(anchor="w", padx=15, pady=(5, 0))
+        self.times_listbox = ctk.CTkTextbox(left_frame, height=60, font=("Courier", 9))
+        self.times_listbox.pack(fill="x", padx=15, pady=5)
+        self.times_listbox.insert("1.0", "(Klik 'Deteksi Jam' untuk mulai)")
+        
+        # Checkbox untuk pilih jam
+        ctk.CTkLabel(left_frame, text="Pilih jam yang ingin di-scan:", font=("Arial", 10)).pack(anchor="w", padx=15, pady=(5, 0))
+        self.times_check_frame = ctk.CTkScrollableFrame(left_frame, height=80)
+        self.times_check_frame.pack(fill="x", padx=15, pady=5)
         
         ctk.CTkFrame(left_frame, height=2, fg_color="gray").pack(fill="x", padx=10, pady=10)
         
@@ -279,6 +304,112 @@ class XXIAutoApp(ctk.CTk):
             if line.strip():
                 regions.append(line.strip())
         return regions
+    
+    def get_selected_times(self):
+        """Ambil jam yang dipilih user"""
+        selected = []
+        for var, label in self.time_checkboxes:
+            if var.get() == 1:
+                selected.append(label.cget("text"))
+        return selected if selected else self.active_times_map.get("all", [])
+    
+    # =========================================================
+    # DETECT ACTIVE TIMES
+    # =========================================================
+    
+    def detect_active_times(self):
+        """Deteksi jam aktif di salah satu bioskop (sample)"""
+        if self.is_detecting_times:
+            messagebox.showwarning("Peringatan", "Deteksi masih berjalan!")
+            return
+        
+        if not self.driver:
+            if not self.connect_chrome():
+                return
+        
+        films = self.get_films()
+        regions = self.get_regions()
+        
+        if not films or not regions:
+            messagebox.showerror("Error", "Isi daftar film dan wilayah terlebih dahulu!")
+            return
+        
+        self.is_detecting_times = True
+        self.scan_btn.configure(state="disabled")
+        self.add_log("🔍 Mulai deteksi jam aktif...")
+        self.status_label.configure(text="⚡ Status: Deteksi jam...")
+        
+        thread = threading.Thread(target=self._detect_times_thread, args=(films, regions), daemon=True)
+        thread.start()
+    
+    def _detect_times_thread(self, films, regions):
+        """Thread untuk deteksi jam aktif"""
+        try:
+            detected_times = set()
+            
+            # Ambil sample dari film & wilayah pertama
+            film = films[0]
+            region = regions[0]
+            
+            film_url = f"https://m.21cineplex.com/id/movies/{film['id']}"
+            
+            self.add_log(f"📍 Sample: {film['name']} - {region}")
+            
+            try:
+                self.driver.get(film_url)
+                self.wait_ready(timeout=10)
+                
+                # Klik wilayah
+                region_btn = self.driver.find_element(By.XPATH, f"//button[contains(text(), '{region}')]")
+                self.driver.execute_script("arguments[0].click(); arguments[0].click();", region_btn)
+                time.sleep(3)
+                
+                # Ambil jam dari semua bioskop
+                showtimes = self.get_showtimes()
+                detected_times.update(showtimes)
+                
+                self.add_log(f"✅ Ditemukan {len(detected_times)} jam: {sorted(list(detected_times))}")
+                
+            except Exception as e:
+                self.add_log(f"⚠️ Error deteksi: {str(e)[:60]}")
+                detected_times = ["10:00", "13:00", "16:00", "19:00", "22:00"]  # Default
+            
+            # Update UI
+            self.active_times_map["all"] = sorted(list(detected_times))
+            self.update_time_checkboxes(sorted(list(detected_times)))
+            
+        except Exception as e:
+            self.add_log(f"❌ Error deteksi jam: {str(e)}")
+        
+        finally:
+            self.is_detecting_times = False
+            self.scan_btn.configure(state="normal")
+    
+    def update_time_checkboxes(self, times):
+        """Update checkbox untuk jam yang terdeteksi"""
+        # Clear frame
+        for widget in self.times_check_frame.winfo_children():
+            widget.destroy()
+        
+        self.time_checkboxes = []
+        
+        # Update textbox
+        self.times_listbox.delete("1.0", "end")
+        self.times_listbox.insert("1.0", "\n".join(times))
+        
+        # Buat checkbox
+        for time_str in times:
+            var = ctk.IntVar(value=1)  # Default checked
+            checkbox = ctk.CTkCheckBox(
+                self.times_check_frame,
+                text=time_str,
+                variable=var,
+                font=("Arial", 11)
+            )
+            checkbox.pack(anchor="w", padx=10, pady=2)
+            self.time_checkboxes.append((var, checkbox))
+        
+        self.add_log(f"✅ Jam aktif sudah di-update")
     
     # =========================================================
     # SELENIUM HELPERS (DARI test5.py)
@@ -473,9 +604,14 @@ class XXIAutoApp(ctk.CTk):
         
         films = self.get_films()
         regions = self.get_regions()
+        selected_times = self.get_selected_times()
         
         if not films or not regions:
             messagebox.showerror("Error", "Isi daftar film dan wilayah terlebih dahulu!")
+            return
+        
+        if not selected_times:
+            messagebox.showerror("Error", "Pilih minimal 1 jam tayang!")
             return
         
         self.is_scanning = True
@@ -488,9 +624,9 @@ class XXIAutoApp(ctk.CTk):
         self.progress.set(0)
         self.total_label.configure(text="Total: 0 sesi")
         
-        self.add_log(f"🚀 SCAN DIMULAI - {len(films)} film, {len(regions)} wilayah")
+        self.add_log(f"🚀 SCAN DIMULAI - {len(films)} film, {len(regions)} wilayah, {len(selected_times)} jam")
         
-        self.scan_thread = threading.Thread(target=self.scan_loop, args=(films, regions), daemon=True)
+        self.scan_thread = threading.Thread(target=self.scan_loop, args=(films, regions, selected_times), daemon=True)
         self.scan_thread.start()
     
     def stop_scan(self):
@@ -499,8 +635,8 @@ class XXIAutoApp(ctk.CTk):
         self.add_log("⏹️ Scan dihentikan manual")
         self.status_label.configure(text="⚡ Status: Dihentikan")
     
-    def scan_loop(self, films, regions):
-        """Main scan loop (SESUAI test5.py)"""
+    def scan_loop(self, films, regions, selected_times):
+        """Main scan loop (SESUAI test5.py + FILTER JAM)"""
         total_combinations = len(films) * len(regions)
         current = 0
         
@@ -590,20 +726,12 @@ class XXIAutoApp(ctk.CTk):
                                     self.add_log(f"   ⚠️ Gagal klik bioskop: {str(e)[:40]}")
                                     continue
                                 
-                                # Dapatkan jam tayang
-                                showtimes = self.get_showtimes()
-                                self.add_log(f"   ✅ Jam tayang: {len(showtimes)} sesi -> {showtimes}")
-                                
-                                if len(showtimes) == 0:
-                                    self.add_log(f"   ⚠️ Tidak ada jam tayang")
-                                    continue
-                                
-                                # Loop setiap jam
-                                for idx, showtime in enumerate(showtimes):
+                                # FILTER: HANYA SCAN JAM YANG DIPILIH
+                                for showtime in selected_times:
                                     if not self.is_scanning:
                                         break
                                     
-                                    self.add_log(f"      [{idx+1}/{len(showtimes)}] Jam: {showtime}...")
+                                    self.add_log(f"      [✓] Jam: {showtime}...")
                                     
                                     try:
                                         # Reset & buka kembali bioskop
